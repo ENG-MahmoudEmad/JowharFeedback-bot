@@ -156,7 +156,7 @@ def get_all_admins():
 # ================== أوامر البوت ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📝 تقديم شكوى", callback_data="report")]]
+    keyboard = [[InlineKeyboardButton("📝 تقديم شكواك", callback_data="report")]]
     if is_admin(update.effective_user.id):
         keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data="admin_panel")])
     
@@ -172,12 +172,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💬 ملاحظة", callback_data="type_feedback")],
             [InlineKeyboardButton("💡 طلب جديد", callback_data="type_request")]
         ]
-        await query.edit_message_text("اختر نوع الشكوى:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("اختر نوع الشكواك:", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data.startswith("type_"):
         complaint_type = query.data.split("_")[1]
         context.user_data['complaint_type'] = complaint_type
-        await query.edit_message_text("📬 اكتب شكايتك الآن:")
+        await query.edit_message_text("📬 اكتب شكواك الآن:")
     
     elif query.data == "admin_panel":
         if not is_admin(query.from_user.id):
@@ -185,7 +185,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         stats = get_stats()
         keyboard = [[InlineKeyboardButton("📋 الشكاوى المعلقة", callback_data="show_pending")]]
-        text = f"⚙️ لوحة التحكم\n\n• إجمالي: {stats['total']}\n• معلقة: {stats['pending']}\n• محلولة: {stats['resolved']}"
+        text = f"""⚙️ لوحة التحكم
+
+📊 الإحصائيات:
+• إجمالي: {stats['total']}
+• معلقة: {stats['pending']}
+• محلولة: {stats['resolved']}"""
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "show_pending":
@@ -197,12 +202,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         complaint = complaints[0]
         context.user_data['current_complaint_id'] = complaint[0]
         keyboard = [[InlineKeyboardButton("💬 الرد", callback_data="reply_complaint")]]
-        text = f"📋 شكوى #{complaint[0]}\n\n👤 من: @{complaint[2]}\n📌 النوع: {COMPLAINT_TYPES.get(complaint[3])}\n💬 الرسالة: {complaint[4]}\n⏰ الوقت: {complaint[8]}"
+        text = f"""📋 شكواك #{complaint[0]}
+
+👤 من: @{complaint[2]}
+📌 النوع: {COMPLAINT_TYPES.get(complaint[3], complaint[3])}
+💬 الشكواك: {complaint[4]}
+⏰ الوقت: {complaint[8]}"""
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "reply_complaint":
         context.user_data['mode'] = 'reply'
-        await query.edit_message_text("📝 اكتب ردك على الشكوى:")
+        await query.edit_message_text("📝 اكتب ردك على الشكواك:")
     
     elif query.data == "publish_complaint":
         complaint_id = context.user_data.get('current_complaint_id')
@@ -210,19 +220,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_reply = context.user_data.get('admin_reply')
         
         if complaint and admin_reply:
-            msg = f"""
-📋 شكوى #{complaint[0]}
+            msg = f"""📋 شكواك #{complaint[0]}
 
 👤 من: @{complaint[2]}
 📌 النوع: {COMPLAINT_TYPES.get(complaint[3])}
-💬 الشكوى: {complaint[4]}
+💬 الشكواك: {complaint[4]}
 
 ✅ الرد من الفريق:
-{admin_reply}
-"""
+{admin_reply}"""
             try:
                 await context.bot.send_message(chat_id=GROUP_ID, text=msg, message_thread_id=TOPIC_ID)
-                await query.edit_message_text("✅ تم نشر الشكوى والرد في المجموعة!")
+                await query.edit_message_text("✅ تم نشر الشكواك والرد في المجموعة!")
                 update_complaint(complaint_id, 'resolved', admin_reply)
             except Exception as e:
                 await query.edit_message_text(f"❌ خطأ في النشر: {str(e)}")
@@ -231,18 +239,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         complaint_id = context.user_data.get('current_complaint_id')
         admin_reply = context.user_data.get('admin_reply')
         update_complaint(complaint_id, 'resolved', admin_reply)
-        await query.edit_message_text("✅ تم تحديث الشكوى كـ محلولة!")
+        await query.edit_message_text("✅ تم تحديث الشكواك كـ محلولة!")
     
     elif query.data == "mark_inprogress":
         complaint_id = context.user_data.get('current_complaint_id')
         update_complaint(complaint_id, 'in_progress')
-        await query.edit_message_text("⏳ تم تحديث الشكوى كـ قيد المراجعة!")
+        await query.edit_message_text("⏳ تم تحديث الشكواك كـ قيد المراجعة!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get('mode')
     
     if mode == 'reply':
-        # الأدمن يرد على الشكوى
+        # الأدمن يرد على الشكواك
         admin_reply = update.message.text
         complaint_id = context.user_data.get('current_complaint_id')
         complaint = get_complaint(complaint_id)
@@ -252,13 +260,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['mode'] = None
             
             # إرسال الرد للعضو
-            reply_msg = f"""
-✅ تم الرد على شكايتك!
+            reply_msg = f"""✅ تم الرد على شكواك!
 
-📋 شكويتك (#{complaint_id}): {complaint[4]}
+📋 شكواك (#{complaint[0]}): {complaint[4]}
 
-📝 الرد: {admin_reply}
-"""
+📝 الرد: {admin_reply}"""
             try:
                 await context.bot.send_message(chat_id=complaint[1], text=reply_msg)
             except:
@@ -273,14 +279,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ تم حفظ الرد!\n\nاختر الإجراء:", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif 'complaint_type' in context.user_data:
-        # عضو عادي يرسل شكوى
+        # عضو عادي يرسل شكواك
         complaint_type = context.user_data.pop('complaint_type')
         message = update.message.text
         user_id = update.effective_user.id
         username = update.effective_user.username or "مستخدم"
         
         save_complaint(user_id, username, complaint_type, message)
-        await update.message.reply_text("✅ تم استقبال شكايتك!")
+        await update.message.reply_text("✅ تم استقبال شكواك!")
         
         # إشعار الأدمن
         admins = get_all_admins()
@@ -288,7 +294,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin[0],
-                    text=f"📩 شكوى جديدة!\n\n👤 من: @{username}\n📌 النوع: {COMPLAINT_TYPES.get(complaint_type)}\n💬 الرسالة: {message}"
+                    text="📩 شكواك جديدة! افتح لوحة التحكم لرؤيتها."
                 )
             except:
                 pass
@@ -297,9 +303,10 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     init_db()
+    # إضافة الأدمنز
     add_admin(7043011146, "MODYER555")
     add_admin(8496647096, "Medoma")
-
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

@@ -318,8 +318,8 @@ def main():
     init_db()
     
     # إضافة الأدمن
-    add_admin(704301146, "MODYER555")
-    
+    add_admin(7043011146, "MODYER555")
+    add_admin(8496647096, "Medoma")
     # الأوامر
     app.add_handler(CommandHandler("start", start))
     

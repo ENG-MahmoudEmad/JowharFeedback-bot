@@ -207,7 +207,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 من: @{complaint[2]}
 📌 النوع: {COMPLAINT_TYPES.get(complaint[3], complaint[3])}
 💬 الشكواك: {complaint[4]}
-⏰ الوقت: {complaint[8]}"""
+⏰ الوقت: {complaint[7]}"""
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data == "reply_complaint":

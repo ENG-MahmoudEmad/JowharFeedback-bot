@@ -205,7 +205,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 def main():
+
     init_db()
+    add_admin(7043011146, "MODYER555")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))

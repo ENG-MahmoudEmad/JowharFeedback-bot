@@ -207,7 +207,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
 
     init_db()
-    add_admin(7043011146, "MODYER555")
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?, ?)", (704301146, "MODYER555"))
+    conn.commit()
+    conn.close()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))

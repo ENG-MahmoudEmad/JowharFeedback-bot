@@ -165,6 +165,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    print(f"Callback data: {query.data}")  # للتشخيص
     
     if query.data == "report":
         keyboard = [

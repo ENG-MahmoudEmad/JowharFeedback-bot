@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from dotenv import load_dotenv
 
 # ================== الإعدادات ==================
@@ -23,6 +23,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DB_PATH = "bot_database.db"
 GROUP_ID = -1003731398016
 TOPIC_ID = 5488
+MIN_COMPLAINT_CHARS = 10
+MAX_COMPLAINT_CHARS = 1000
+MAX_REPLY_CHARS = 1500
 
 # الحالات المتقدمة
 COMPLAINT_STATUS = {
@@ -182,6 +185,61 @@ class DatabaseManager:
             return True
         except Exception as e:
             logger.error(f"❌ خطأ في إضافة الرد: {e}")
+            return False
+
+    @staticmethod
+    def get_latest_admin_reply(complaint_id: int, admin_id: int) -> Optional[sqlite3.Row]:
+        """جلب آخر رد كتبه نفس الأدمن على الشكوى"""
+        try:
+            conn = DatabaseManager.get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT * FROM complaint_replies
+                WHERE complaint_id = ? AND admin_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            """, (complaint_id, admin_id))
+            result = cur.fetchone()
+            conn.close()
+            return result
+        except Exception as e:
+            logger.error(f"❌ خطأ في جلب آخر رد للأدمن: {e}")
+            return None
+
+    @staticmethod
+    def update_reply(reply_id: int, admin_id: int, reply_text: str) -> bool:
+        """تعديل رد موجود لنفس الأدمن"""
+        try:
+            conn = DatabaseManager.get_db()
+            cur = conn.cursor()
+            updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            cur.execute("""
+                UPDATE complaint_replies
+                SET reply_text = ?, created_at = ?
+                WHERE id = ? AND admin_id = ?
+            """, (reply_text, updated_at, reply_id, admin_id))
+            affected = cur.rowcount
+
+            cur.execute("""
+                UPDATE complaints
+                SET status = 'closed', admin_id = ?, updated_at = ?
+                WHERE id = (
+                    SELECT complaint_id FROM complaint_replies WHERE id = ?
+                )
+            """, (admin_id, updated_at, reply_id))
+
+            conn.commit()
+            conn.close()
+
+            if affected == 0:
+                logger.error(f"❌ لم يتم تعديل الرد #{reply_id}: غير موجود أو لا يخص الأدمن")
+                return False
+
+            logger.info(f"✅ تم تعديل الرد #{reply_id}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ خطأ في تعديل الرد: {e}")
             return False
     
     @staticmethod
@@ -433,12 +491,25 @@ def complaint_id_from_callback(callback_data: str, context: ContextTypes.DEFAULT
 
     return None
 
+async def safe_edit_message(query, text: str, reply_markup=None):
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            try:
+                await query.answer("لا يوجد تغيير جديد.", show_alert=False)
+            except Exception:
+                pass
+            return
+        raise
+
 # ================== معالجات التيليجرام ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر /start"""
     try:
         user_id = update.effective_user.id
+        context.user_data.clear()
         
         if not await is_group_member(context, user_id):
             await update.message.reply_text(
@@ -484,7 +555,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif callback_data.startswith("type_"):
             complaint_type = callback_data.split("_")[1]
             context.user_data['complaint_type'] = complaint_type
-            await query.edit_message_text("📬 اكتب تفاصيل الشكوى الآن:")
+            await safe_edit_message(
+                query,
+                f"📬 اكتب تفاصيل الشكوى الآن:\n\n"
+                f"الحد المسموح: من {MIN_COMPLAINT_CHARS} إلى {MAX_COMPLAINT_CHARS} حرف."
+            )
         
         # ========== لوحة التحكم ==========
         elif callback_data == "admin_panel":
@@ -515,7 +590,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 اختر فئة للعرض:"""
             
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
         
         # ========== الفلترة ==========
         elif callback_data.startswith("filter_"):
@@ -532,7 +607,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not complaints:
                 keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-                await query.edit_message_text("✅ لا توجد شكاوى في هذه الفئة", reply_markup=InlineKeyboardMarkup(keyboard))
+                await safe_edit_message(query, "✅ لا توجد شكاوى في هذه الفئة", reply_markup=InlineKeyboardMarkup(keyboard))
                 return
             
             context.user_data['current_complaints'] = [dict(c) for c in complaints]
@@ -545,6 +620,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif callback_data in ["next_complaint", "prev_complaint"]:
             complaints = context.user_data.get('current_complaints', [])
             if not complaints:
+                return
+            if len(complaints) == 1:
+                await query.answer("لا توجد شكوى أخرى في هذه الفئة.", show_alert=False)
                 return
             
             current_index = context.user_data.get('current_index', 0)
@@ -560,14 +638,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_complaint_detail(query, context, complaint_dict)
         
         # ========== الرد على الشكوى ==========
-        elif callback_data.startswith("reply_complaint"):
+        elif callback_data.startswith(("reply_complaint", "add_reply")):
             complaint_id = complaint_id_from_callback(callback_data, context, query)
             if not complaint_id or not DatabaseManager.get_complaint(complaint_id):
-                await query.edit_message_text("❌ لم يتم تحديد الشكوى", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ لم يتم تحديد الشكوى", reply_markup=done_keyboard())
                 return
             context.user_data['current_complaint_id'] = complaint_id
-            context.user_data['mode'] = 'reply'
-            await query.edit_message_text("📝 اكتب ردك على الشكوى:")
+            context.user_data['mode'] = 'add_reply'
+            await query.message.reply_text(
+                f"📝 اكتب الرد الجديد على الشكوى #{complaint_id}.\n"
+                f"الحد الأقصى: {MAX_REPLY_CHARS} حرف."
+            )
+
+        elif callback_data.startswith("edit_reply"):
+            complaint_id = complaint_id_from_callback(callback_data, context, query)
+            complaint = DatabaseManager.get_complaint(complaint_id)
+            reply = DatabaseManager.get_latest_admin_reply(complaint_id, query.from_user.id) if complaint_id else None
+            if not complaint or not reply:
+                await safe_edit_message(
+                    query,
+                    "❌ لا يوجد رد سابق لك لتعديله على هذه الشكوى.",
+                    reply_markup=done_keyboard()
+                )
+                return
+            context.user_data['current_complaint_id'] = complaint_id
+            context.user_data['current_reply_id'] = reply['id']
+            context.user_data['mode'] = 'edit_reply'
+            await query.message.reply_text(
+                f"✏️ اكتب النص الجديد لردك على الشكوى #{complaint_id}.\n\n"
+                f"الرد الحالي:\n{reply['reply_text']}\n\n"
+                f"الحد الأقصى: {MAX_REPLY_CHARS} حرف."
+            )
         
         # ========== نشر في المجموعة ==========
         elif callback_data.startswith("publish_complaint"):
@@ -588,53 +689,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(chat_id=GROUP_ID, text=msg)
                     
                     logger.info(f"✅ تم نشر الشكوى #{complaint_id} في المجموعة")
-                    await query.edit_message_text(
+                    await safe_edit_message(
+                        query,
                         "✅ تم نشر الشكوى في المجموعة بنجاح!",
                         reply_markup=done_keyboard()
                     )
                 except TelegramError as e:
                     logger.error(f"❌ خطأ في النشر: {e}")
-                    await query.edit_message_text(f"❌ خطأ: {str(e)[:100]}")
+                    await safe_edit_message(query, f"❌ خطأ: {str(e)[:100]}")
             else:
-                await query.edit_message_text("❌ لم يتم العثور على الشكوى", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ لم يتم العثور على الشكوى", reply_markup=done_keyboard())
         
         # ========== تحديث الحالة ==========
         elif callback_data.startswith("close_complaint"):
             complaint_id = complaint_id_from_callback(callback_data, context, query)
             if not complaint_id:
-                await query.edit_message_text("❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
                 return
             if DatabaseManager.update_complaint_status(complaint_id, 'closed'):
-                await query.edit_message_text(
+                await safe_edit_message(
+                    query,
                     f"✅ تم إغلاق الشكوى #{complaint_id}",
                     reply_markup=done_keyboard()
                 )
             else:
-                await query.edit_message_text("❌ فشل إغلاق الشكوى. تأكد أنها موجودة ثم حاول مرة أخرى.", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ فشل إغلاق الشكوى. تأكد أنها موجودة ثم حاول مرة أخرى.", reply_markup=done_keyboard())
         
         elif callback_data.startswith("inprogress_complaint"):
             complaint_id = complaint_id_from_callback(callback_data, context, query)
             if not complaint_id:
-                await query.edit_message_text("❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
                 return
             if DatabaseManager.update_complaint_status(complaint_id, 'in_progress'):
-                await query.edit_message_text(
+                await safe_edit_message(
+                    query,
                     f"⏳ الشكوى #{complaint_id} أصبحت قيد المراجعة",
                     reply_markup=done_keyboard()
                 )
             else:
-                await query.edit_message_text("❌ فشل تحديث الحالة. تأكد أن الشكوى موجودة ثم حاول مرة أخرى.", reply_markup=done_keyboard())
+                await safe_edit_message(query, "❌ فشل تحديث الحالة. تأكد أن الشكوى موجودة ثم حاول مرة أخرى.", reply_markup=done_keyboard())
         
         # ========== الرجوع ==========
         elif callback_data == "back_main":
-            await query.edit_message_text(
+            await safe_edit_message(
+                query,
                 "👋 أهلاً وسهلاً!\n\nاختر ما تريد:",
                 reply_markup=main_menu_keyboard(query.from_user.id)
             )
         
         elif callback_data == "end_session":
             context.user_data.clear()
-            await query.edit_message_text("تم إنهاء القائمة. اكتب /start إذا احتجت ترجع.")
+            await safe_edit_message(query, "تم إنهاء القائمة. اكتب /start إذا احتجت ترجع.")
         
         elif callback_data == "noop":
             pass
@@ -661,11 +766,16 @@ async def show_complaint_detail(query, context, complaint):
     replies = DatabaseManager.get_complaint_replies(complaint_id)
     has_reply = len(replies) > 0
     
-    # الزر الديناميكي للرد
-    reply_button_text = "✏️ تعديل الرد" if has_reply else "💬 الرد على الشكوى"
-    
-    keyboard = [
-        [InlineKeyboardButton(reply_button_text, callback_data=f"reply_complaint:{complaint_id}")],
+    keyboard = []
+    if has_reply:
+        keyboard.extend([
+            [InlineKeyboardButton("✏️ تعديل ردي", callback_data=f"edit_reply:{complaint_id}")],
+            [InlineKeyboardButton("➕ إضافة رد جديد", callback_data=f"add_reply:{complaint_id}")]
+        ])
+    else:
+        keyboard.append([InlineKeyboardButton("💬 الرد على الشكوى", callback_data=f"reply_complaint:{complaint_id}")])
+
+    keyboard.extend([
         [InlineKeyboardButton("📤 نشر في المجموعة", callback_data=f"publish_complaint:{complaint_id}")],
         [InlineKeyboardButton("⏳ قيد المراجعة", callback_data=f"inprogress_complaint:{complaint_id}"),
          InlineKeyboardButton("🔒 إغلاق", callback_data=f"close_complaint:{complaint_id}")],
@@ -673,7 +783,7 @@ async def show_complaint_detail(query, context, complaint):
          InlineKeyboardButton(f"({context.user_data.get('current_index', 0) + 1})", callback_data="noop"),
          InlineKeyboardButton("التالية ➡", callback_data="next_complaint")],
         [InlineKeyboardButton("« رجوع", callback_data="admin_panel")]
-    ]
+    ])
     
     text = format_complaint_detail(complaint_obj)
     
@@ -682,7 +792,7 @@ async def show_complaint_detail(query, context, complaint):
         for reply in replies:
             text += f"✅ {reply['reply_text']}\n"
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الرسائل النصية"""
@@ -696,19 +806,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = context.user_data.get('mode')
         
         # ========== وضع الرد ==========
-        if mode == 'reply':
+        if mode in ('reply', 'add_reply', 'edit_reply'):
             admin_reply = update.message.text
             complaint_id = context.user_data.get('current_complaint_id')
+            reply_id = context.user_data.get('current_reply_id')
             complaint = DatabaseManager.get_complaint(complaint_id)
+
+            if len(admin_reply.strip()) == 0 or len(admin_reply) > MAX_REPLY_CHARS:
+                await update.message.reply_text(
+                    f"❌ الرد يجب أن يكون من 1 إلى {MAX_REPLY_CHARS} حرف. اكتب الرد مرة أخرى."
+                )
+                return
             
             if complaint:
-                # إضافة الرد وتحديث الحالة تلقائياً
-                if DatabaseManager.add_reply(complaint_id, user_id, admin_reply):
+                is_edit = mode == 'edit_reply'
+                saved = (
+                    DatabaseManager.update_reply(reply_id, user_id, admin_reply)
+                    if is_edit and reply_id
+                    else DatabaseManager.add_reply(complaint_id, user_id, admin_reply)
+                )
+
+                if saved:
                     context.user_data['mode'] = None
+                    context.user_data.pop('current_reply_id', None)
                     
                     # إرسال رسالة استقبال احترافية للمستخدم
                     user_msg = f"""
-✅ تم الرد على الشكوى
+✅ تم {'تحديث الرد على' if is_edit else 'الرد على'} الشكوى
 
 ━━━━━━━━━━━━━━━━
 📋 رقم الشكوى: #{complaint_id}
@@ -729,19 +853,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"❌ خطأ في إرسال الرد: {e}")
                     
                     await update.message.reply_text(
-                        f"✅ تم حفظ الرد وإرساله للمستخدم!\n\n"
+                        f"✅ تم {'تعديل الرد' if is_edit else 'حفظ الرد'} وإرساله للمستخدم!\n\n"
                         f"🔒 الشكوى #{complaint_id} أصبحت مغلقة تلقائياً.",
                         reply_markup=done_keyboard()
                     )
+                else:
+                    await update.message.reply_text("❌ فشل حفظ الرد. حاول مرة أخرى.", reply_markup=done_keyboard())
             else:
                 context.user_data['mode'] = None
+                context.user_data.pop('current_reply_id', None)
                 await update.message.reply_text("❌ الشكوى غير موجودة.", reply_markup=done_keyboard())
         
         # ========== تقديم شكوى جديدة ==========
         elif 'complaint_type' in context.user_data:
-            complaint_type = context.user_data.pop('complaint_type')
+            complaint_type = context.user_data.get('complaint_type')
             message = update.message.text
             username = update.effective_user.username or "مستخدم"
+
+            if len(message.strip()) < MIN_COMPLAINT_CHARS:
+                await update.message.reply_text(
+                    f"❌ تفاصيل الشكوى قصيرة جدًا. اكتب على الأقل {MIN_COMPLAINT_CHARS} أحرف."
+                )
+                return
+
+            if len(message) > MAX_COMPLAINT_CHARS:
+                await update.message.reply_text(
+                    f"❌ تفاصيل الشكوى طويلة جدًا. الحد الأقصى {MAX_COMPLAINT_CHARS} حرف.\n"
+                    f"عدد أحرف رسالتك: {len(message)}"
+                )
+                return
+
+            context.user_data.pop('complaint_type', None)
             
             complaint_id = DatabaseManager.save_complaint(user_id, username, complaint_type, message)
             

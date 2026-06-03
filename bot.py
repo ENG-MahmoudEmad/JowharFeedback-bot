@@ -26,6 +26,7 @@ TOPIC_ID = 5488
 MIN_COMPLAINT_CHARS = 10
 MAX_COMPLAINT_CHARS = 1000
 MAX_REPLY_CHARS = 1500
+DELETE_REPLIED_AFTER_HOURS = 48
 
 # الحالات المتقدمة
 COMPLAINT_STATUS = {
@@ -327,6 +328,47 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ خطأ في تحديث الشكوى: {e}")
             return False
+
+    @staticmethod
+    def cleanup_expired_replied_complaints(hours: int = DELETE_REPLIED_AFTER_HOURS) -> int:
+        """حذف الشكاوى التي تم الرد عليها وإغلاقها بعد مدة محددة"""
+        try:
+            cutoff = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = DatabaseManager.get_db()
+            cur = conn.cursor()
+
+            cur.execute("""
+                SELECT id FROM complaints
+                WHERE status = 'closed'
+                  AND admin_id IS NOT NULL
+                  AND updated_at IS NOT NULL
+                  AND updated_at <= ?
+            """, (cutoff,))
+            complaint_ids = [row['id'] for row in cur.fetchall()]
+
+            if not complaint_ids:
+                conn.close()
+                return 0
+
+            placeholders = ",".join("?" for _ in complaint_ids)
+            cur.execute(
+                f"DELETE FROM complaint_replies WHERE complaint_id IN ({placeholders})",
+                complaint_ids
+            )
+            cur.execute(
+                f"DELETE FROM complaints WHERE id IN ({placeholders})",
+                complaint_ids
+            )
+
+            deleted = cur.rowcount
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✅ تم حذف {deleted} شكوى مغلقة مر عليها أكثر من {hours} ساعة")
+            return deleted
+        except Exception as e:
+            logger.error(f"❌ خطأ في تنظيف الشكاوى القديمة: {e}")
+            return 0
     
     @staticmethod
     def get_stats() -> dict:
@@ -419,6 +461,14 @@ async def is_group_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> b
         logger.error(f"❌ خطأ في التحقق من العضوية: {e}")
         return False
 
+def is_private_chat(update: Update) -> bool:
+    return bool(update.effective_chat and update.effective_chat.type == "private")
+
+async def can_use_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not is_private_chat(update):
+        return False
+    return await is_group_member(context, update.effective_user.id)
+
 def format_complaint_detail(complaint: sqlite3.Row) -> str:
     """تنسيق تفاصيل الشكوى بشكل احترافي"""
     status_emoji, _ = COMPLAINT_STATUS.get(complaint['status'], ('❓', 'unknown'))
@@ -510,6 +560,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         context.user_data.clear()
+
+        if not is_private_chat(update):
+            return
+
+        DatabaseManager.cleanup_expired_replied_complaints()
         
         if not await is_group_member(context, user_id):
             await update.message.reply_text(
@@ -542,6 +597,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ خطأ في query.answer(): {e}")
     
     try:
+        if not is_private_chat(update):
+            return
+
+        if not await is_group_member(context, query.from_user.id):
+            await safe_edit_message(query, "❌ هذا البوت متاح فقط لأعضاء المجموعة.")
+            return
+
+        DatabaseManager.cleanup_expired_replied_complaints()
+
         # ========== تقديم شكوى ==========
         if callback_data == "report":
             keyboard = [
@@ -798,6 +862,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الرسائل النصية"""
     try:
         user_id = update.effective_user.id
+
+        if not is_private_chat(update):
+            return
+
+        DatabaseManager.cleanup_expired_replied_complaints()
         
         if not await is_group_member(context, user_id):
             await update.message.reply_text("❌ هذا البوت متاح فقط لأعضاء المجموعة")
@@ -932,6 +1001,7 @@ def main():
     
     # تهيئة قاعدة البيانات
     DatabaseManager.init_db()
+    DatabaseManager.cleanup_expired_replied_complaints()
     
     # إضافة الأدمنز
     DatabaseManager.add_admin(7043011146, "MODYER555")
@@ -949,3 +1019,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
@@ -103,6 +104,21 @@ class DatabaseManager:
                 avg_response_time REAL DEFAULT 0
             )
             """)
+
+            cur.execute("PRAGMA table_info(complaints)")
+            complaint_columns = {row[1] for row in cur.fetchall()}
+            if "admin_id" not in complaint_columns:
+                cur.execute("ALTER TABLE complaints ADD COLUMN admin_id INTEGER")
+                logger.info("✅ تمت إضافة عمود admin_id إلى جدول complaints")
+            if "updated_at" not in complaint_columns:
+                cur.execute("ALTER TABLE complaints ADD COLUMN updated_at TEXT")
+                logger.info("✅ تمت إضافة عمود updated_at إلى جدول complaints")
+
+            cur.execute("PRAGMA table_info(complaint_replies)")
+            reply_columns = {row[1] for row in cur.fetchall()}
+            if reply_columns and "reply_type" not in reply_columns:
+                cur.execute("ALTER TABLE complaint_replies ADD COLUMN reply_type TEXT DEFAULT 'admin'")
+                logger.info("✅ تمت إضافة عمود reply_type إلى جدول complaint_replies")
             
             conn.commit()
             conn.close()
@@ -399,13 +415,23 @@ def done_keyboard(include_admin_panel: bool = True) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton("إنهاء", callback_data="end_session")])
     return InlineKeyboardMarkup(keyboard)
 
-def complaint_id_from_callback(callback_data: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+def complaint_id_from_callback(callback_data: str, context: ContextTypes.DEFAULT_TYPE, query=None) -> Optional[int]:
     if ":" in callback_data:
         try:
             return int(callback_data.split(":", 1)[1])
         except (TypeError, ValueError):
-            return None
-    return context.user_data.get('current_complaint_id')
+            pass
+
+    complaint_id = context.user_data.get('current_complaint_id')
+    if complaint_id:
+        return complaint_id
+
+    message_text = getattr(getattr(query, "message", None), "text", "") or ""
+    match = re.search(r"#(\d+)", message_text)
+    if match:
+        return int(match.group(1))
+
+    return None
 
 # ================== معالجات التيليجرام ==================
 
@@ -535,7 +561,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ========== الرد على الشكوى ==========
         elif callback_data.startswith("reply_complaint"):
-            complaint_id = complaint_id_from_callback(callback_data, context)
+            complaint_id = complaint_id_from_callback(callback_data, context, query)
             if not complaint_id or not DatabaseManager.get_complaint(complaint_id):
                 await query.edit_message_text("❌ لم يتم تحديد الشكوى", reply_markup=done_keyboard())
                 return
@@ -545,7 +571,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ========== نشر في المجموعة ==========
         elif callback_data.startswith("publish_complaint"):
-            complaint_id = complaint_id_from_callback(callback_data, context)
+            complaint_id = complaint_id_from_callback(callback_data, context, query)
             complaint = DatabaseManager.get_complaint(complaint_id)
             replies = DatabaseManager.get_complaint_replies(complaint_id)
             
@@ -574,7 +600,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ========== تحديث الحالة ==========
         elif callback_data.startswith("close_complaint"):
-            complaint_id = complaint_id_from_callback(callback_data, context)
+            complaint_id = complaint_id_from_callback(callback_data, context, query)
+            if not complaint_id:
+                await query.edit_message_text("❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
+                return
             if DatabaseManager.update_complaint_status(complaint_id, 'closed'):
                 await query.edit_message_text(
                     f"✅ تم إغلاق الشكوى #{complaint_id}",
@@ -584,7 +613,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ فشل إغلاق الشكوى. تأكد أنها موجودة ثم حاول مرة أخرى.", reply_markup=done_keyboard())
         
         elif callback_data.startswith("inprogress_complaint"):
-            complaint_id = complaint_id_from_callback(callback_data, context)
+            complaint_id = complaint_id_from_callback(callback_data, context, query)
+            if not complaint_id:
+                await query.edit_message_text("❌ لم أستطع تحديد رقم الشكوى. افتحها من لوحة التحكم مرة أخرى.", reply_markup=done_keyboard())
+                return
             if DatabaseManager.update_complaint_status(complaint_id, 'in_progress'):
                 await query.edit_message_text(
                     f"⏳ الشكوى #{complaint_id} أصبحت قيد المراجعة",

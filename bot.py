@@ -1,736 +1,439 @@
 import os
 import sqlite3
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, List, Tuple
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 
-# ================== الإعدادات ==================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DB_PATH = "bot_database.db"
-GROUP_ID = -1003731398016
-TOPIC_ID = 5488
-
-# الحالات المتقدمة
-COMPLAINT_STATUS = {
-    "pending": ("🟡 معلقة", "pending"),
-    "in_progress": ("🔵 قيد المراجعة", "in_progress"),
-    "replied": ("🟢 تم الرد", "replied"),
-    "closed": ("✅ مغلقة", "closed"),
-}
+DB_PATH        = "bot_database.db"
+GROUP_ID       = -1003731398016
+TOPIC_ID       = 5488
 
 COMPLAINT_TYPES = {
-    "bug": "🐛 خلل تقني",
+    "bug":      "🐛 خلل تقني",
     "feedback": "💬 ملاحظة",
-    "request": "💡 طلب جديد"
+    "request":  "💡 طلب جديد"
+}
+STATUS_LABELS = {
+    "pending":     "🟡 معلقة",
+    "in_progress": "🔵 قيد المراجعة",
+    "replied":     "🟢 تم الرد",
+    "closed":      "✅ مغلقة",
 }
 
-# ================== قاعدة البيانات المحسّنة ==================
+# ================== قاعدة البيانات ==================
 
-class DatabaseManager:
-    """إدارة قاعدة البيانات بشكل احترافي"""
-    
+class DB:
     @staticmethod
-    def get_db():
-        """الحصول على اتصال قاعدة البيانات مع sqlite3.Row"""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        return conn
-    
+    def conn():
+        c = sqlite3.connect(DB_PATH)
+        c.row_factory = sqlite3.Row
+        return c
+
     @staticmethod
-    def init_db():
-        """تهيئة قاعدة البيانات مع جداول متقدمة"""
+    def init():
         try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            
-            # جدول الأدمنز
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-            
-            # جدول الشكاوى المحسّن
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS complaints (
+            con = DB.conn(); cur = con.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY, username TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS complaints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                username TEXT NOT NULL,
-                complaint_type TEXT NOT NULL,
-                message TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                admin_id INTEGER,
-                created_at TEXT NOT NULL,
-                updated_at TEXT,
-                FOREIGN KEY (admin_id) REFERENCES admins(user_id)
-            )
-            """)
-            
-            # جدول سجل الردود (Conversation Log)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS complaint_replies (
+                user_id INTEGER NOT NULL, username TEXT NOT NULL,
+                complaint_type TEXT NOT NULL, message TEXT NOT NULL,
+                status TEXT DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS complaint_replies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                complaint_id INTEGER NOT NULL,
-                admin_id INTEGER,
-                reply_text TEXT NOT NULL,
-                reply_type TEXT DEFAULT 'admin',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (complaint_id) REFERENCES complaints(id)
-            )
-            """)
-            
-            # جدول إحصائيات
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS complaint_stats (
-                date TEXT PRIMARY KEY,
-                total_complaints INTEGER DEFAULT 0,
-                resolved_complaints INTEGER DEFAULT 0,
-                avg_response_time REAL DEFAULT 0
-            )
-            """)
-            
-            conn.commit()
-            conn.close()
-            logger.info("✅ قاعدة البيانات تم تهيئتها بنجاح")
-            return True
+                complaint_id INTEGER NOT NULL, admin_id INTEGER,
+                reply_text TEXT NOT NULL, created_at TEXT NOT NULL)""")
+            con.commit(); con.close()
+            logger.info("✅ قاعدة البيانات جاهزة")
         except Exception as e:
-            logger.error(f"❌ خطأ في تهيئة قاعدة البيانات: {e}")
-            return False
-    
+            logger.error(f"❌ init: {e}")
+
     @staticmethod
-    def save_complaint(user_id: int, username: str, complaint_type: str, message: str) -> Optional[int]:
-        """حفظ شكوى جديدة"""
+    def add_admin(uid, uname):
         try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            cur.execute("""
-                INSERT INTO complaints (user_id, username, complaint_type, message, created_at, status)
-                VALUES (?, ?, ?, ?, ?, 'pending')
-            """, (user_id, username, complaint_type, message, created_at))
-            
-            conn.commit()
-            complaint_id = cur.lastrowid
-            conn.close()
-            
-            logger.info(f"✅ تم حفظ شكوى جديدة #{complaint_id}")
-            return complaint_id
+            con = DB.conn()
+            con.execute("INSERT OR IGNORE INTO admins (user_id, username) VALUES (?,?)", (uid, uname))
+            con.commit(); con.close()
+            logger.info(f"✅ أدمن: {uname}")
         except Exception as e:
-            logger.error(f"❌ خطأ في حفظ الشكوى: {e}")
-            return None
-    
+            logger.error(f"❌ add_admin: {e}")
+
     @staticmethod
-    def add_reply(complaint_id: int, admin_id: int, reply_text: str) -> bool:
-        """إضافة رد إلى الشكوى"""
+    def is_admin(uid):
         try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            cur.execute("""
-                INSERT INTO complaint_replies (complaint_id, admin_id, reply_text, created_at)
-                VALUES (?, ?, ?, ?)
-            """, (complaint_id, admin_id, reply_text, created_at))
-            
-            # تحديث حالة الشكوى إلى "تم الرد"
-            cur.execute("""
-                UPDATE complaints 
-                SET status = 'replied', admin_id = ?, updated_at = ?
-                WHERE id = ?
-            """, (admin_id, created_at, complaint_id))
-            
-            conn.commit()
-            conn.close()
-            
-            logger.info(f"✅ تم إضافة رد للشكوى #{complaint_id}")
-            return True
+            con = DB.conn()
+            r = con.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,)).fetchone()
+            con.close(); return r is not None
         except Exception as e:
-            logger.error(f"❌ خطأ في إضافة الرد: {e}")
-            return False
-    
+            logger.error(f"❌ is_admin: {e}"); return False
+
     @staticmethod
-    def get_complaint(complaint_id: int) -> Optional[sqlite3.Row]:
-        """جلب شكوى بواسطة الرقم"""
+    def get_all_admins():
         try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM complaints WHERE id = ?", (complaint_id,))
-            result = cur.fetchone()
-            conn.close()
-            return result
+            con = DB.conn()
+            r = con.execute("SELECT * FROM admins").fetchall()
+            con.close(); return r
         except Exception as e:
-            logger.error(f"❌ خطأ في جلب الشكوى: {e}")
-            return None
-    
+            logger.error(f"❌ get_all_admins: {e}"); return []
+
     @staticmethod
-    def get_pending_complaints(filter_status: str = None) -> List[sqlite3.Row]:
-        """جلب الشكاوى مع إمكانية الفلترة"""
+    def save_complaint(uid, uname, ctype, msg):
         try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            
-            if filter_status:
-                cur.execute("""
-                    SELECT * FROM complaints 
-                    WHERE status = ? 
-                    ORDER BY created_at DESC
-                """, (filter_status,))
+            con = DB.conn(); now = datetime.now().strftime('%Y-%m-%d %H:%M')
+            cur = con.execute(
+                "INSERT INTO complaints (user_id,username,complaint_type,message,created_at) VALUES (?,?,?,?,?)",
+                (uid, uname, ctype, msg, now))
+            con.commit(); cid = cur.lastrowid; con.close(); return cid
+        except Exception as e:
+            logger.error(f"❌ save_complaint: {e}"); return None
+
+    @staticmethod
+    def get_complaint(cid):
+        try:
+            con = DB.conn()
+            r = con.execute("SELECT * FROM complaints WHERE id=?", (cid,)).fetchone()
+            con.close(); return r
+        except Exception as e:
+            logger.error(f"❌ get_complaint: {e}"); return None
+
+    @staticmethod
+    def get_complaints(status=None):
+        try:
+            con = DB.conn()
+            if status == "active":
+                r = con.execute("SELECT * FROM complaints WHERE status IN ('pending','in_progress') ORDER BY id DESC").fetchall()
+            elif status:
+                r = con.execute("SELECT * FROM complaints WHERE status=? ORDER BY id DESC", (status,)).fetchall()
             else:
-                cur.execute("""
-                    SELECT * FROM complaints 
-                    WHERE status IN ('pending', 'in_progress')
-                    ORDER BY created_at DESC
-                """)
-            
-            result = cur.fetchall()
-            conn.close()
-            return result
+                r = con.execute("SELECT * FROM complaints ORDER BY id DESC").fetchall()
+            con.close(); return r
         except Exception as e:
-            logger.error(f"❌ خطأ في جلب الشكاوى: {e}")
-            return []
-    
-    @staticmethod
-    def get_complaint_replies(complaint_id: int) -> List[sqlite3.Row]:
-        """جلب جميع ردود الشكوى"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT * FROM complaint_replies
-                WHERE complaint_id = ?
-                ORDER BY created_at ASC
-            """, (complaint_id,))
-            result = cur.fetchall()
-            conn.close()
-            return result
-        except Exception as e:
-            logger.error(f"❌ خطأ في جلب الردود: {e}")
-            return []
-    
-    @staticmethod
-    def update_complaint_status(complaint_id: int, status: str) -> bool:
-        """تحديث حالة الشكوى"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            cur.execute("""
-                UPDATE complaints 
-                SET status = ?, updated_at = ?
-                WHERE id = ?
-            """, (status, updated_at, complaint_id))
-            
-            conn.commit()
-            conn.close()
-            
-            logger.info(f"✅ تم تحديث حالة الشكوى #{complaint_id} إلى {status}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ خطأ في تحديث الشكوى: {e}")
-            return False
-    
-    @staticmethod
-    def get_stats() -> dict:
-        """جلب الإحصائيات"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            
-            cur.execute("SELECT COUNT(*) FROM complaints")
-            total = cur.fetchone()[0]
-            
-            cur.execute("SELECT COUNT(*) FROM complaints WHERE status = 'pending'")
-            pending = cur.fetchone()[0]
-            
-            cur.execute("SELECT COUNT(*) FROM complaints WHERE status = 'in_progress'")
-            in_progress = cur.fetchone()[0]
-            
-            cur.execute("SELECT COUNT(*) FROM complaints WHERE status = 'replied'")
-            replied = cur.fetchone()[0]
-            
-            cur.execute("SELECT COUNT(*) FROM complaints WHERE status = 'closed'")
-            closed = cur.fetchone()[0]
-            
-            conn.close()
-            return {
-                "total": total,
-                "pending": pending,
-                "in_progress": in_progress,
-                "replied": replied,
-                "closed": closed
-            }
-        except Exception as e:
-            logger.error(f"❌ خطأ في جلب الإحصائيات: {e}")
-            return {"total": 0, "pending": 0, "in_progress": 0, "replied": 0, "closed": 0}
-    
-    @staticmethod
-    def is_admin(user_id: int) -> bool:
-        """التحقق من كون المستخدم أدمن"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM admins WHERE user_id = ?", (user_id,))
-            result = cur.fetchone()
-            conn.close()
-            return result is not None
-        except Exception as e:
-            logger.error(f"❌ خطأ في التحقق من الأدمن: {e}")
-            return False
-    
-    @staticmethod
-    def add_admin(user_id: int, username: str) -> bool:
-        """إضافة أدمن"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT OR IGNORE INTO admins (user_id, username)
-                VALUES (?, ?)
-            """, (user_id, username))
-            conn.commit()
-            conn.close()
-            logger.info(f"✅ تم إضافة أدمن: {username}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ خطأ في إضافة أدمن: {e}")
-            return False
-    
-    @staticmethod
-    def get_all_admins() -> List[sqlite3.Row]:
-        """جلب جميع الأدمنز"""
-        try:
-            conn = DatabaseManager.get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM admins")
-            result = cur.fetchall()
-            conn.close()
-            return result
-        except Exception as e:
-            logger.error(f"❌ خطأ في جلب الأدمنز: {e}")
-            return []
+            logger.error(f"❌ get_complaints: {e}"); return []
 
-# ================== وظائف مساعدة ==================
+    @staticmethod
+    def update_status(cid, status):
+        try:
+            con = DB.conn(); now = datetime.now().strftime('%Y-%m-%d %H:%M')
+            affected = con.execute(
+                "UPDATE complaints SET status=?, updated_at=? WHERE id=?", (status, now, cid)
+            ).rowcount
+            con.commit(); con.close()
+            if affected > 0:
+                logger.info(f"✅ شكوى #{cid} → {status}"); return True
+            logger.error(f"❌ update_status: 0 rows affected, cid={cid}"); return False
+        except Exception as e:
+            logger.error(f"❌ update_status: {e}"); return False
 
-async def is_group_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """التحقق من كون المستخدم عضو في المجموعة"""
+    @staticmethod
+    def add_reply(cid, admin_id, text):
+        try:
+            con = DB.conn(); now = datetime.now().strftime('%Y-%m-%d %H:%M')
+            con.execute("INSERT INTO complaint_replies (complaint_id,admin_id,reply_text,created_at) VALUES (?,?,?,?)",
+                        (cid, admin_id, text, now))
+            con.execute("UPDATE complaints SET status='replied', updated_at=? WHERE id=?", (now, cid))
+            con.commit(); con.close()
+            logger.info(f"✅ رد على #{cid}"); return True
+        except Exception as e:
+            logger.error(f"❌ add_reply: {e}"); return False
+
+    @staticmethod
+    def get_replies(cid):
+        try:
+            con = DB.conn()
+            r = con.execute("SELECT * FROM complaint_replies WHERE complaint_id=? ORDER BY created_at ASC", (cid,)).fetchall()
+            con.close(); return r
+        except Exception as e:
+            logger.error(f"❌ get_replies: {e}"); return []
+
+    @staticmethod
+    def get_stats():
+        try:
+            con = DB.conn()
+            t  = con.execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
+            p  = con.execute("SELECT COUNT(*) FROM complaints WHERE status='pending'").fetchone()[0]
+            ip = con.execute("SELECT COUNT(*) FROM complaints WHERE status='in_progress'").fetchone()[0]
+            re = con.execute("SELECT COUNT(*) FROM complaints WHERE status='replied'").fetchone()[0]
+            cl = con.execute("SELECT COUNT(*) FROM complaints WHERE status='closed'").fetchone()[0]
+            con.close()
+            return {"total": t, "pending": p, "in_progress": ip, "replied": re, "closed": cl}
+        except Exception as e:
+            logger.error(f"❌ get_stats: {e}")
+            return {"total":0,"pending":0,"in_progress":0,"replied":0,"closed":0}
+
+# ================== مساعدات UI ==================
+
+async def is_member(ctx, uid):
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+        m = await ctx.bot.get_chat_member(GROUP_ID, uid)
+        return m.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except Exception as e:
-        logger.error(f"❌ خطأ في التحقق من العضوية: {e}")
-        return False
+        logger.error(f"❌ is_member: {e}"); return False
 
-def format_complaint_detail(complaint: sqlite3.Row) -> str:
-    """تنسيق تفاصيل الشكوى بشكل احترافي"""
-    status_emoji, _ = COMPLAINT_STATUS.get(complaint['status'], ('❓', 'unknown'))
-    complaint_type = COMPLAINT_TYPES.get(complaint['complaint_type'], complaint['complaint_type'])
-    
-    return f"""
-📋 رقم الشكوى: #{complaint['id']}
+def kb_main(is_admin_flag):
+    rows = [[InlineKeyboardButton("📝 تقديم شكوى جديدة", callback_data="report")]]
+    if is_admin_flag:
+        rows.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(rows)
 
-👤 من: @{complaint['username']}
-📌 النوع: {complaint_type}
-💬 الشكوى: {complaint['message']}
-⏰ التاريخ: {complaint['created_at']}
-{status_emoji} الحالة: {status_emoji.split()[0]} {complaint['status']}
-"""
-
-def format_complaint_for_group(complaint: sqlite3.Row, replies: List[sqlite3.Row] = None) -> str:
-    """تنسيق الشكوى للنشر في المجموعة"""
-    status_emoji, _ = COMPLAINT_STATUS.get(complaint['status'], ('❓', 'unknown'))
-    complaint_type = COMPLAINT_TYPES.get(complaint['complaint_type'], complaint['complaint_type'])
-    
-    msg = f"""
-📋 الشكوى #{complaint['id']}
-
-👤 من: @{complaint['username']}
-📌 النوع: {complaint_type}
-💬 تفاصيل الشكوى:
-{complaint['message']}
-
-⏰ تاريخ الإنشاء: {complaint['created_at']}
-{status_emoji} الحالة: {complaint['status']}
-"""
-    
+def text_complaint(c, replies=None):
+    status = STATUS_LABELS.get(c['status'], c['status'])
+    ctype  = COMPLAINT_TYPES.get(c['complaint_type'], c['complaint_type'])
+    t = (f"📋 شكوى #{c['id']}\n\n"
+         f"👤 من: @{c['username']}\n"
+         f"📌 النوع: {ctype}\n"
+         f"💬 الشكوى: {c['message']}\n"
+         f"⏰ التاريخ: {c['created_at']}\n"
+         f"• الحالة: {status}")
     if replies:
-        msg += "\n📝 الردود:\n"
-        for reply in replies:
-            msg += f"\n✅ {reply['reply_text']}\n"
-    
-    return msg
+        t += "\n\n🟢 الردود:\n━━━━━━━━━━━━━━━━"
+        for r in replies:
+            t += f"\n✅ {r['reply_text']}\n   🕐 {r['created_at']}"
+    return t
 
-# ================== معالجات التيليجرام ==================
+def kb_complaint(has_reply, idx, total):
+    reply_label = "✏️ تعديل الرد" if has_reply else "💬 الرد على الشكوى"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(reply_label,               callback_data="do_reply")],
+        [InlineKeyboardButton("📤 نشر في المجموعة",      callback_data="do_publish")],
+        [InlineKeyboardButton("🔵 قيد المراجعة",        callback_data="do_inprogress"),
+         InlineKeyboardButton("🔒 إغلاق",               callback_data="do_close")],
+        [InlineKeyboardButton("⬅ السابقة",              callback_data="nav_prev"),
+         InlineKeyboardButton(f"{idx+1}/{total}",        callback_data="noop"),
+         InlineKeyboardButton("التالية ➡",              callback_data="nav_next")],
+        [InlineKeyboardButton("« رجوع للوحة",           callback_data="admin_panel")]
+    ])
+
+async def show_complaint(query, context, cid):
+    c = DB.get_complaint(cid)
+    if not c:
+        await query.edit_message_text("❌ لم يتم العثور على الشكوى"); return
+    context.user_data['current_cid'] = cid
+    replies   = DB.get_replies(cid)
+    has_reply = len(replies) > 0
+    ids       = context.user_data.get('complaints', [cid])
+    idx       = context.user_data.get('c_index', 0)
+    await query.edit_message_text(text_complaint(c, replies), reply_markup=kb_complaint(has_reply, idx, len(ids)))
+
+# ================== Handlers ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر /start"""
-    try:
-        user_id = update.effective_user.id
-        
-        if not await is_group_member(context, user_id):
-            await update.message.reply_text(
-                "❌ عذراً!\n\n"
-                "هذا البوت متاح فقط لأعضاء المجموعة.\n"
-                "يرجى الانضمام إلى المجموعة أولاً."
-            )
-            return
-        
-        keyboard = [[InlineKeyboardButton("📝 تقديم شكوى جديدة", callback_data="report")]]
-        if DatabaseManager.is_admin(user_id):
-            keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data="admin_panel")])
-        
-        await update.message.reply_text(
-            "👋 أهلاً وسهلاً!\n\n"
-            "هذا البوت مخصص لاستقبال شكاواكم وملاحظاتكم.\n"
-            "اختر ما تريد:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except Exception as e:
-        logger.error(f"❌ خطأ في /start: {e}")
-        await update.message.reply_text("❌ حدث خطأ ما. حاول لاحقاً.")
+    uid = update.effective_user.id
+    if not await is_member(context, uid):
+        await update.message.reply_text("❌ هذا البوت لأعضاء المجموعة فقط."); return
+    context.user_data.clear()
+    await update.message.reply_text("👋 أهلاً!\n\nاختر ما تريد:", reply_markup=kb_main(DB.is_admin(uid)))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج جميع الأزرار"""
     query = update.callback_query
-    callback_data = query.data
-    
-    logger.info(f"📍 Callback: {callback_data} من المستخدم {query.from_user.id}")
-    
+    data  = query.data
+    uid   = query.from_user.id
+    logger.info(f"📍 {data} ← {uid}")
+    try: await query.answer()
+    except: pass
+
     try:
-        await query.answer()
-    except Exception as e:
-        logger.error(f"❌ خطأ في query.answer(): {e}")
-    
-    try:
-        # ========== تقديم شكوى ==========
-        if callback_data == "report":
-            keyboard = [
-                [InlineKeyboardButton("🐛 خلل تقني", callback_data="type_bug")],
-                [InlineKeyboardButton("💬 ملاحظة", callback_data="type_feedback")],
-                [InlineKeyboardButton("💡 طلب جديد", callback_data="type_request")],
-                [InlineKeyboardButton("« رجوع", callback_data="back_main")]
+        # رجوع للقائمة الرئيسية
+        if data == "go_main":
+            await query.edit_message_text("👋 أهلاً!\n\nاختر ما تريد:", reply_markup=kb_main(DB.is_admin(uid)))
+
+        # تقديم شكوى
+        elif data == "report":
+            kb = [
+                [InlineKeyboardButton("🐛 خلل تقني",  callback_data="type_bug")],
+                [InlineKeyboardButton("💬 ملاحظة",    callback_data="type_feedback")],
+                [InlineKeyboardButton("💡 طلب جديد",  callback_data="type_request")],
+                [InlineKeyboardButton("« رجوع",       callback_data="go_main")]
             ]
-            await query.edit_message_text("اختر نوع الشكوى:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        elif callback_data.startswith("type_"):
-            complaint_type = callback_data.split("_")[1]
-            context.user_data['complaint_type'] = complaint_type
+            await query.edit_message_text("اختر نوع الشكوى:", reply_markup=InlineKeyboardMarkup(kb))
+
+        elif data.startswith("type_"):
+            context.user_data['complaint_type'] = data.split("_")[1]
             await query.edit_message_text("📬 اكتب تفاصيل الشكوى الآن:")
-        
-        # ========== لوحة التحكم ==========
-        elif callback_data == "admin_panel":
-            if not DatabaseManager.is_admin(query.from_user.id):
-                await query.edit_message_text("❌ ليس لديك صلاحيات")
-                return
-            
-            stats = DatabaseManager.get_stats()
-            keyboard = [
-                [InlineKeyboardButton("📂 جميع الشكاوى", callback_data="filter_all")],
-                [InlineKeyboardButton("🟡 المعلقة", callback_data="filter_pending"),
-                 InlineKeyboardButton("🔵 المراجعة", callback_data="filter_inprogress")],
-                [InlineKeyboardButton("🟢 المحلولة", callback_data="filter_replied"),
-                 InlineKeyboardButton("✅ المغلقة", callback_data="filter_closed")],
-                [InlineKeyboardButton("« رجوع", callback_data="back_main")]
+
+        # لوحة التحكم
+        elif data == "admin_panel":
+            if not DB.is_admin(uid):
+                await query.edit_message_text("❌ ليس لديك صلاحيات"); return
+            s  = DB.get_stats()
+            kb = [
+                [InlineKeyboardButton("📂 جميع الشكاوى",  callback_data="filter_all")],
+                [InlineKeyboardButton("🟡 المعلقة",        callback_data="filter_pending"),
+                 InlineKeyboardButton("🔵 المراجعة",       callback_data="filter_inprogress")],
+                [InlineKeyboardButton("🟢 تم الرد",        callback_data="filter_replied"),
+                 InlineKeyboardButton("✅ المغلقة",         callback_data="filter_closed")],
+                [InlineKeyboardButton("« رجوع",           callback_data="go_main")]
             ]
-            
-            text = f"""⚙️ لوحة التحكم
+            text = (f"⚙️ لوحة التحكم\n\n📊 الإحصائيات:\n━━━━━━━━━━━━━━━━\n"
+                    f"📈 الإجمالي:  {s['total']}\n🟡 المعلقة:   {s['pending']}\n"
+                    f"🔵 المراجعة:  {s['in_progress']}\n🟢 تم الرد:   {s['replied']}\n"
+                    f"✅ المغلقة:   {s['closed']}\n━━━━━━━━━━━━━━━━")
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-📊 الإحصائيات:
-━━━━━━━━━━━━━━━━
-📈 الإجمالي: {stats['total']}
-🟡 المعلقة: {stats['pending']}
-🔵 المراجعة: {stats['in_progress']}
-🟢 المحلولة: {stats['replied']}
-✅ المغلقة: {stats['closed']}
-━━━━━━━━━━━━━━━━
+        # الفلترة
+        elif data.startswith("filter_"):
+            ft = data.split("_")[1]
+            sm = {"all": None, "pending": "pending", "inprogress": "in_progress", "replied": "replied", "closed": "closed"}
+            complaints = DB.get_complaints(sm.get(ft))
+            if not complaints:
+                kb = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
+                await query.edit_message_text("✅ لا توجد شكاوى في هذه الفئة.", reply_markup=InlineKeyboardMarkup(kb)); return
+            context.user_data['complaints'] = [c['id'] for c in complaints]
+            context.user_data['c_index']    = 0
+            await show_complaint(query, context, complaints[0]['id'])
 
-اختر فئة للعرض:"""
-            
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        # ========== الفلترة ==========
-        elif callback_data.startswith("filter_"):
-            filter_type = callback_data.split("_")[1]
-            status_map = {
-                "all": None,
-                "pending": "pending",
-                "inprogress": "in_progress",
-                "replied": "replied",
-                "closed": "closed"
-            }
-            
-            complaints = DatabaseManager.get_pending_complaints(status_map.get(filter_type))
-            
-            if not complaints:
-                keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-                await query.edit_message_text("✅ لا توجد شكاوى في هذه الفئة", reply_markup=InlineKeyboardMarkup(keyboard))
-                return
-            
-            context.user_data['current_complaints'] = [dict(c) for c in complaints]
-            context.user_data['current_index'] = 0
-            
-            complaint = complaints[0]
-            await show_complaint_detail(query, context, complaint)
-        
-        # ========== التنقل بين الشكاوى ==========
-        elif callback_data in ["next_complaint", "prev_complaint"]:
-            complaints = context.user_data.get('current_complaints', [])
-            if not complaints:
-                return
-            
-            current_index = context.user_data.get('current_index', 0)
-            
-            if callback_data == "next_complaint":
-                current_index = (current_index + 1) % len(complaints)
-            else:
-                current_index = (current_index - 1) % len(complaints)
-            
-            context.user_data['current_index'] = current_index
-            complaint_dict = complaints[current_index]
-            
-            await show_complaint_detail(query, context, complaint_dict)
-        
-        # ========== الرد على الشكوى ==========
-        elif callback_data == "reply_complaint":
+        # التنقل
+        elif data in ["nav_next", "nav_prev"]:
+            ids = context.user_data.get('complaints', [])
+            idx = context.user_data.get('c_index', 0)
+            idx = (idx+1) % len(ids) if data == "nav_next" else (idx-1) % len(ids)
+            context.user_data['c_index'] = idx
+            await show_complaint(query, context, ids[idx])
+
+        # الرد
+        elif data == "do_reply":
             context.user_data['mode'] = 'reply'
             await query.edit_message_text("📝 اكتب ردك على الشكوى:")
-        
-        # ========== نشر في المجموعة ==========
-        elif callback_data == "publish_complaint":
-            complaint_id = context.user_data.get('current_complaint_id')
-            complaint = DatabaseManager.get_complaint(complaint_id)
-            replies = DatabaseManager.get_complaint_replies(complaint_id)
-            
-            if complaint:
-                msg = format_complaint_for_group(complaint, replies)
-                try:
-                    if TOPIC_ID:
-                        await context.bot.send_message(
-                            chat_id=GROUP_ID,
-                            text=msg,
-                            message_thread_id=TOPIC_ID
-                        )
-                    else:
-                        await context.bot.send_message(chat_id=GROUP_ID, text=msg)
-                    
-                    logger.info(f"✅ تم نشر الشكوى #{complaint_id} في المجموعة")
-                    keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-                    await query.edit_message_text(
-                        "✅ تم نشر الشكوى في المجموعة بنجاح!",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                except TelegramError as e:
-                    logger.error(f"❌ خطأ في النشر: {e}")
-                    await query.edit_message_text(f"❌ خطأ: {str(e)[:100]}")
-        
-        # ========== تحديث الحالة ==========
-        elif callback_data == "close_complaint":
-            complaint_id = context.user_data.get('current_complaint_id')
-            DatabaseManager.update_complaint_status(complaint_id, 'closed')
-            keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-            await query.edit_message_text("✅ تم إغلاق الشكوى", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        elif callback_data == "inprogress_complaint":
-            complaint_id = context.user_data.get('current_complaint_id')
-            DatabaseManager.update_complaint_status(complaint_id, 'in_progress')
-            keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-            await query.edit_message_text("⏳ تم تحديث الحالة لـ 'قيد المراجعة'", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        # ========== الرجوع ==========
-        elif callback_data == "back_main":
-            keyboard = [[InlineKeyboardButton("📝 تقديم شكوى جديدة", callback_data="report")]]
-            if DatabaseManager.is_admin(query.from_user.id):
-                keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data="admin_panel")])
-            
-            await query.edit_message_text(
-                "👋 أهلاً وسهلاً!\n\nاختر ما تريد:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        
-        elif callback_data == "noop":
-            pass
-    
-    except Exception as e:
-        logger.error(f"❌ خطأ في handle_callback: {e}")
-        try:
-            await query.edit_message_text(f"❌ حدث خطأ: {str(e)[:100]}")
-        except:
+
+        # نشر
+        elif data == "do_publish":
+            cid = context.user_data.get('current_cid')
+            if not cid:
+                await query.edit_message_text("❌ لم يتم تحديد الشكوى"); return
+            c       = DB.get_complaint(cid)
+            replies = DB.get_replies(cid)
+            msg     = text_complaint(c, replies)
+            try:
+                if TOPIC_ID:
+                    await context.bot.send_message(chat_id=GROUP_ID, text=msg, message_thread_id=TOPIC_ID)
+                else:
+                    await context.bot.send_message(chat_id=GROUP_ID, text=msg)
+                kb = [[InlineKeyboardButton("« رجوع للوحة", callback_data="admin_panel")]]
+                await query.edit_message_text("✅ تم النشر في المجموعة!", reply_markup=InlineKeyboardMarkup(kb))
+            except TelegramError as e:
+                logger.error(f"❌ نشر: {e}")
+                await query.edit_message_text(f"❌ خطأ في النشر:\n{str(e)[:150]}")
+
+        # إغلاق
+        elif data == "do_close":
+            cid = context.user_data.get('current_cid')
+            if not cid:
+                await query.edit_message_text("❌ لم يتم تحديد الشكوى"); return
+            if DB.update_status(cid, 'closed'):
+                kb = [[InlineKeyboardButton("« رجوع للوحة", callback_data="admin_panel")]]
+                await query.edit_message_text(f"🔒 تم إغلاق الشكوى #{cid} بنجاح.", reply_markup=InlineKeyboardMarkup(kb))
+            else:
+                await query.edit_message_text("❌ فشل الإغلاق، حاول مرة أخرى.")
+
+        # قيد المراجعة
+        elif data == "do_inprogress":
+            cid = context.user_data.get('current_cid')
+            if not cid:
+                await query.edit_message_text("❌ لم يتم تحديد الشكوى"); return
+            if DB.update_status(cid, 'in_progress'):
+                kb = [[InlineKeyboardButton("« رجوع للوحة", callback_data="admin_panel")]]
+                await query.edit_message_text(f"🔵 الشكوى #{cid} الآن قيد المراجعة.", reply_markup=InlineKeyboardMarkup(kb))
+            else:
+                await query.edit_message_text("❌ فشل التحديث، حاول مرة أخرى.")
+
+        elif data == "noop":
             pass
 
-async def show_complaint_detail(query, context, complaint):
-    """عرض تفاصيل الشكوى مع الخيارات"""
-    complaint_id = complaint.get('id') if isinstance(complaint, dict) else complaint['id']
-    
-    complaint_obj = DatabaseManager.get_complaint(complaint_id)
-    if not complaint_obj:
-        await query.edit_message_text("❌ لم يتم العثور على الشكوى")
-        return
-    
-    context.user_data['current_complaint_id'] = complaint_id
-    
-    # الحصول على عدد الردود
-    replies = DatabaseManager.get_complaint_replies(complaint_id)
-    has_reply = len(replies) > 0
-    
-    # الزر الديناميكي للرد
-    reply_button_text = "✏️ تعديل الرد" if has_reply else "💬 الرد على الشكوى"
-    
-    keyboard = [
-        [InlineKeyboardButton(reply_button_text, callback_data="reply_complaint")],
-        [InlineKeyboardButton("📤 نشر في المجموعة", callback_data="publish_complaint")],
-        [InlineKeyboardButton("⏳ قيد المراجعة", callback_data="inprogress_complaint"),
-         InlineKeyboardButton("🔒 إغلاق", callback_data="close_complaint")],
-        [InlineKeyboardButton("⬅ السابقة", callback_data="prev_complaint"),
-         InlineKeyboardButton(f"({context.user_data.get('current_index', 0) + 1})", callback_data="noop"),
-         InlineKeyboardButton("التالية ➡", callback_data="next_complaint")],
-        [InlineKeyboardButton("« رجوع", callback_data="admin_panel")]
-    ]
-    
-    text = format_complaint_detail(complaint_obj)
-    
-    if has_reply:
-        text += "\n🟢 الردود:\n━━━━━━━━━━━━━━━━\n"
-        for reply in replies:
-            text += f"✅ {reply['reply_text']}\n"
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"❌ handle_callback: {e}")
+        try: await query.edit_message_text(f"❌ خطأ: {str(e)[:100]}")
+        except: pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الرسائل النصية"""
-    try:
-        user_id = update.effective_user.id
-        
-        if not await is_group_member(context, user_id):
-            await update.message.reply_text("❌ هذا البوت متاح فقط لأعضاء المجموعة")
-            return
-        
-        mode = context.user_data.get('mode')
-        
-        # ========== وضع الرد ==========
-        if mode == 'reply':
-            admin_reply = update.message.text
-            complaint_id = context.user_data.get('current_complaint_id')
-            complaint = DatabaseManager.get_complaint(complaint_id)
-            
-            if complaint:
-                # إضافة الرد وتحديث الحالة تلقائياً
-                if DatabaseManager.add_reply(complaint_id, user_id, admin_reply):
-                    context.user_data['mode'] = None
-                    
-                    # إرسال رسالة استقبال احترافية للمستخدم
-                    user_msg = f"""
-✅ تم الرد على الشكوى
+    uid      = update.effective_user.id
+    username = update.effective_user.username or "مستخدم"
 
-━━━━━━━━━━━━━━━━
-📋 رقم الشكوى: #{complaint_id}
-📌 النوع: {COMPLAINT_TYPES.get(complaint['complaint_type'])}
-💬 الشكوى: {complaint['message']}
-━━━━━━━━━━━━━━━━
+    if not await is_member(context, uid):
+        await update.message.reply_text("❌ هذا البوت لأعضاء المجموعة فقط."); return
 
-📝 الرد:
-{admin_reply}
+    mode = context.user_data.get('mode')
 
-━━━━━━━━━━━━━━━━
-شكراً لك على تواصلك معنا.
-"""
-                    try:
-                        await context.bot.send_message(chat_id=complaint['user_id'], text=user_msg)
-                        logger.info(f"✅ تم إرسال الرد للمستخدم {complaint['user_id']}")
-                    except Exception as e:
-                        logger.error(f"❌ خطأ في إرسال الرد: {e}")
-                    
-                    keyboard = [[InlineKeyboardButton("« رجوع", callback_data="admin_panel")]]
-                    await update.message.reply_text(
-                        "✅ تم حفظ الرد وإرساله للمستخدم!\n\n"
-                        "الآن يمكنك:\n"
-                        "• نشر الشكوى في المجموعة\n"
-                        "• إغلاق الشكوى\n"
-                        "• أو العودة للقائمة",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
+    # وضع الرد
+    if mode == 'reply':
+        reply_text = update.message.text
+        cid        = context.user_data.get('current_cid')
+        if not cid:
+            await update.message.reply_text("❌ لم يتم تحديد الشكوى. ابدأ من /start"); return
+        c = DB.get_complaint(cid)
+        if not c:
+            await update.message.reply_text("❌ الشكوى غير موجودة."); return
+
+        if DB.add_reply(cid, uid, reply_text):
+            context.user_data['mode'] = None
+            # رسالة للمستخدم
+            try:
+                await context.bot.send_message(
+                    chat_id=c['user_id'],
+                    text=(f"✅ تم الرد على شكواك\n\n━━━━━━━━━━━━━━━━\n"
+                          f"📋 رقم الشكوى: #{cid}\n"
+                          f"📌 النوع: {COMPLAINT_TYPES.get(c['complaint_type'])}\n"
+                          f"💬 شكواك: {c['message']}\n━━━━━━━━━━━━━━━━\n\n"
+                          f"📝 الرد:\n{reply_text}\n\nشكراً لتواصلك معنا 🙏")
+                )
+            except Exception as e:
+                logger.error(f"❌ إرسال للمستخدم: {e}")
+            # خيارات للأدمن
+            kb = [
+                [InlineKeyboardButton("📤 نشر في المجموعة", callback_data="do_publish")],
+                [InlineKeyboardButton("« رجوع للوحة",       callback_data="admin_panel")]
+            ]
+            await update.message.reply_text(
+                f"✅ تم إرسال الرد!\n🟢 الشكوى #{cid} أصبحت: تم الرد\n\nهل تريد نشرها في المجموعة؟",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        else:
+            await update.message.reply_text("❌ فشل حفظ الرد. حاول مرة أخرى.")
+
+    # تقديم شكوى جديدة
+    elif 'complaint_type' in context.user_data:
+        ctype   = context.user_data.pop('complaint_type')
+        message = update.message.text
+        cid     = DB.save_complaint(uid, username, ctype, message)
+        if cid:
+            await update.message.reply_text(
+                f"✅ تم استلام شكواك بنجاح!\n\n━━━━━━━━━━━━━━━━\n"
+                f"📋 رقم الشكوى: #{cid}\n"
+                f"📌 النوع: {COMPLAINT_TYPES.get(ctype)}\n"
+                f"⏰ الوقت: {datetime.now().strftime('%H:%M')}\n━━━━━━━━━━━━━━━━\n\n"
+                f"سنقوم بمراجعتها والرد عليك قريباً 🙏"
+            )
+            for admin in DB.get_all_admins():
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin['user_id'],
+                        text=(f"📩 شكوى جديدة #{cid}\n👤 من: @{username}\n"
+                              f"📌 النوع: {COMPLAINT_TYPES.get(ctype)}\n\nافتح لوحة التحكم للمراجعة.")
                     )
-        
-        # ========== تقديم شكوى جديدة ==========
-        elif 'complaint_type' in context.user_data:
-            complaint_type = context.user_data.pop('complaint_type')
-            message = update.message.text
-            username = update.effective_user.username or "مستخدم"
-            
-            complaint_id = DatabaseManager.save_complaint(user_id, username, complaint_type, message)
-            
-            if complaint_id:
-                # رسالة استقبال احترافية
-                confirmation_msg = f"""
-✅ تم استلام الشكوى بنجاح
+                except Exception as e:
+                    logger.error(f"❌ إشعار أدمن: {e}")
+        else:
+            await update.message.reply_text("❌ حدث خطأ. حاول مرة أخرى.")
 
-━━━━━━━━━━━━━━━━
-📋 رقم الشكوى: #{complaint_id}
-📌 النوع: {COMPLAINT_TYPES.get(complaint_type)}
-⏰ الوقت: {datetime.now().strftime('%H:%M:%S')}
-━━━━━━━━━━━━━━━━
-
-سنقوم بمراجعة الشكوى والرد عليك قريباً.
-شكراً لك على تواصلك معنا! 🙏
-"""
-                await update.message.reply_text(confirmation_msg)
-                
-                # إشعار الأدمنز
-                admins = DatabaseManager.get_all_admins()
-                logger.info(f"📢 إرسال إشعار إلى {len(admins)} أدمن")
-                
-                for admin in admins:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=admin['user_id'],
-                            text=f"📩 شكوى جديدة #{complaint_id}\n\n"
-                                 f"من: @{username}\n"
-                                 f"النوع: {COMPLAINT_TYPES.get(complaint_type)}\n\n"
-                                 f"افتح لوحة التحكم لمراجعتها."
-                        )
-                    except Exception as e:
-                        logger.error(f"❌ خطأ في إرسال إشعار: {e}")
-    
-    except Exception as e:
-        logger.error(f"❌ خطأ في handle_message: {e}")
-
-# ================== البدء ==========
+# ================== التشغيل ==================
 
 def main():
-    """تشغيل البوت"""
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    logger.info("🚀 بدء تهيئة البوت...")
-    
-    # تهيئة قاعدة البيانات
-    DatabaseManager.init_db()
-    
-    # إضافة الأدمنز
-    DatabaseManager.add_admin(7043011146, "MODYER555")
-    DatabaseManager.add_admin(8496647096, "Medoma")
-    
-    # تسجيل المعالجات
+    DB.init()
+    DB.add_admin(7043011146, "MODYER555")
+    DB.add_admin(8496647096, "Medoma")
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("✅ البوت جاهز!")
-    logger.info("🚀 بدء استقبال الرسائل...")
-    
+    logger.info("🚀 البوت يعمل...")
     app.run_polling()
 
 if __name__ == "__main__":

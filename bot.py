@@ -273,7 +273,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 من: @{complaint[2]}
 📌 النوع: {COMPLAINT_TYPES.get(complaint[3], complaint[3])}
 💬 الشكاوى: {complaint[4]}
-⏰ الوقت: {complaint[-1]}
+⏰ الوقت: {complaint[-1] if len(complaint) > 7 else 'N/A'}
 🔴 الحالة: {complaint[5]}"""
             
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -304,7 +304,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 من: @{complaint[2]}
 📌 النوع: {COMPLAINT_TYPES.get(complaint[3], complaint[3])}
 💬 الشكاوى: {complaint[4]}
-⏰ الوقت: {complaint[7]}
+⏰ الوقت: {complaint[-1] if len(complaint) > 7 else 'N/A'}
 🔴 الحالة: {complaint[5]}"""
             
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
